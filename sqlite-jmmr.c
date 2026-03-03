@@ -7,8 +7,8 @@
 **
 ** CREATE VIRTUAL TABLE t_mmr USING jaccard_mmr(
 **     source_table,
-**     text_expr              -- SQL expression for text to tokenize
-**     [, rank_expr]          -- SQL expression for relevance (default: rank)
+**     text_expr,             -- SQL expression for text to tokenize
+**     rank_expr              -- SQL expression for relevance scoring
 ** );
 **
 ** SELECT rowid, rank, text FROM t_mmr
@@ -31,7 +31,7 @@ SQLITE_EXTENSION_INIT1
 #include "sqlite3.h"
 #endif
 
-/* ---- Error helper (same pattern as sqlite-vec) ----------------------- */
+/* ---- Error helper ---------------------------------------------------- */
 
 static void vtab_set_error(sqlite3_vtab *pVTab, const char *zFormat, ...) {
   va_list args;
@@ -194,15 +194,15 @@ static int jmmrInit(sqlite3 *db, void *pAux, int argc,
                     const char *const *argv, sqlite3_vtab **ppVtab,
                     char **pzErr) {
   (void)pAux;
-  if (argc < 5) {
+  if (argc < 6) {
     *pzErr = sqlite3_mprintf(
-        "jaccard_mmr: expected (source_table, text_expr [, rank_expr])");
+        "jaccard_mmr: expected (source_table, text_expr, rank_expr)");
     return SQLITE_ERROR;
   }
 
   const char *source_table = argv[3];
   const char *text_expr = argv[4];
-  const char *rank_expr = (argc >= 6) ? argv[5] : "rank";
+  const char *rank_expr = argv[5];
 
   /*
   ** Schema:
@@ -253,7 +253,7 @@ static int jmmrDestroy(sqlite3_vtab *pVtab) {
 /* ---- xBestIndex ------------------------------------------------------ */
 
 /*
-** idxStr encoding: 4 bytes per constraint (matching sqlite-vec pattern).
+** idxStr encoding: 4 bytes per constraint.
 **   byte 0: kind character
 **   bytes 1-3: filler ('_')
 **
@@ -383,8 +383,9 @@ static int jmmrFilter(sqlite3_vtab_cursor *pCur, int idxNum,
   if (!match_text || !match_text[0])
     return SQLITE_OK;
 
-  /* Overfetch: k*5 candidates for MMR reranking */
-  int fetch_limit = (mmr_lambda < 1.0) ? k * 5 : k;
+  /* Overfetch candidates for MMR reranking */
+#define JMMR_OVERFETCH_FACTOR 5
+  int fetch_limit = (mmr_lambda < 1.0) ? k * JMMR_OVERFETCH_FACTOR : k;
   if (fetch_limit < k)
     fetch_limit = k;
 

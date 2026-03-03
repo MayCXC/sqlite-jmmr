@@ -3,9 +3,6 @@
 A small SQLite extension that adds Jaccard-based Maximal Marginal Relevance
 (MMR) reranking to search results.
 
-> [!NOTE]
-> `sqlite-jmmr` is pre-v1 — the API may change.
-
 - Wraps any MATCH-capable table (FTS5, etc.) with a diversity-aware reranker
 - Overfetches candidates, tokenizes text, and uses greedy MMR to promote topical variety
 - Configurable text and rank expressions — works with `snippet()`, plain columns, or any SQL expression
@@ -26,10 +23,8 @@ MATCH-capable source table. It overfetches candidates, tokenizes the text of
 each result, computes pairwise Jaccard similarity between token sets, and runs a
 greedy MMR selection loop to balance relevance against diversity.
 
-The interface mirrors [`sqlite-vec`](https://github.com/asg017/sqlite-vec)'s
-`mmr_lambda` hidden column pattern — same concept (relevance vs. diversity
-trade-off), different similarity metric (Jaccard on text tokens vs. cosine on
-embeddings).
+The interface uses a hidden column pattern for `mmr_lambda` — balancing
+relevance against diversity via a single tuning parameter.
 
 ## Sample usage
 
@@ -51,7 +46,8 @@ INSERT INTO docs_fts(rowid, title, body) VALUES
 -- Create the wrapper table (text_expr = snippet on body column)
 CREATE VIRTUAL TABLE docs_fts_mmr USING jaccard_mmr(
   docs_fts,
-  snippet(docs_fts, 1, '>>>', '<<<', '...', 16)
+  snippet(docs_fts, 1, '>>>', '<<<', '...', 16),
+  rank
 );
 
 -- Pure relevance (lambda=1.0): same order as FTS5
@@ -70,8 +66,8 @@ SELECT rowid, text FROM docs_fts_mmr
 ```sql
 CREATE VIRTUAL TABLE <name> USING jaccard_mmr(
     <source_table>,
-    <text_expr>
-    [, <rank_expr>]
+    <text_expr>,
+    <rank_expr>
 );
 ```
 
@@ -79,7 +75,7 @@ CREATE VIRTUAL TABLE <name> USING jaccard_mmr(
 |-----------|-------------|
 | `source_table` | Name of the source table (must support `MATCH`) |
 | `text_expr` | SQL expression for the text to tokenize and return as `text` |
-| `rank_expr` | SQL expression for relevance scoring (default: `rank`) |
+| `rank_expr` | SQL expression for relevance scoring |
 
 The `text_expr` can be any valid SQL expression that produces text — a column
 name, `snippet()`, string concatenation, etc. It is evaluated in the context of
