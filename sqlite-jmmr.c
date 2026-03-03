@@ -11,8 +11,8 @@
 **     [, rank_expr]          -- SQL expression for relevance (default: rank)
 ** );
 **
-** SELECT rowid, rank, snippet FROM t_mmr
-**   WHERE snippet MATCH :q AND k = :k AND mmr_lambda = :lambda;
+** SELECT rowid, rank, text FROM t_mmr
+**   WHERE text MATCH :q AND k = :k AND mmr_lambda = :lambda;
 **
 ** BSD 3-Clause License. See LICENSE for details.
 */
@@ -161,13 +161,13 @@ static double jmmr_jaccard(jmmr_tokenset *a, jmmr_tokenset *b) {
 typedef struct jmmr_row {
   sqlite3_int64 rowid;
   double bm25_rank;
-  char *snippet;
+  char *text;
   jmmr_tokenset tokens;
   int selected;
 } jmmr_row;
 
 static void jmmr_row_free(jmmr_row *r) {
-  sqlite3_free(r->snippet);
+  sqlite3_free(r->text);
   jmmr_tokenset_free(&r->tokens);
 }
 
@@ -207,14 +207,14 @@ static int jmmrInit(sqlite3 *db, void *pAux, int argc,
   /*
   ** Schema:
   **   rank       REAL  HIDDEN  (col 0) — relevance score from source
-  **   snippet    TEXT          (col 1) — text expression result
+  **   text       TEXT          (col 1) — text expression result
   **   k          INT   HIDDEN  (col 2) — result count
   **   mmr_lambda REAL  HIDDEN  (col 3) — 1.0=relevance, 0.5=balanced
   */
   int rc = sqlite3_declare_vtab(db,
     "CREATE TABLE x("
     "rank REAL HIDDEN, "
-    "snippet TEXT, "
+    "text TEXT, "
     "k INT HIDDEN, "
     "mmr_lambda REAL HIDDEN)");
   if (rc != SQLITE_OK)
@@ -433,10 +433,10 @@ static int jmmrFilter(sqlite3_vtab_cursor *pCur, int idxNum,
     rows[n].rowid = sqlite3_column_int64(stmt, 0);
     rows[n].bm25_rank = sqlite3_column_double(stmt, 1);
     const char *snip = (const char *)sqlite3_column_text(stmt, 2);
-    rows[n].snippet = sqlite3_mprintf("%s", snip ? snip : "");
+    rows[n].text = sqlite3_mprintf("%s", snip ? snip : "");
     jmmr_tokenset_init(&rows[n].tokens);
     rows[n].selected = 0;
-    if (!rows[n].snippet) {
+    if (!rows[n].text) {
       for (int i = 0; i < n; i++)
         jmmr_row_free(&rows[i]);
       sqlite3_free(rows);
@@ -454,9 +454,9 @@ static int jmmrFilter(sqlite3_vtab_cursor *pCur, int idxNum,
 
   /* --- MMR reranking --- */
   if (mmr_lambda < 1.0 && n > 1) {
-    /* Tokenize all snippets */
+    /* Tokenize all text */
     for (int i = 0; i < n; i++) {
-      rc = jmmr_tokenset_tokenize(&rows[i].tokens, rows[i].snippet);
+      rc = jmmr_tokenset_tokenize(&rows[i].tokens, rows[i].text);
       if (rc != SQLITE_OK) {
         for (int j = 0; j < n; j++)
           jmmr_row_free(&rows[j]);
@@ -593,8 +593,8 @@ static int jmmrColumn(sqlite3_vtab_cursor *pCur, sqlite3_context *ctx,
   case 0: /* rank */
     sqlite3_result_double(ctx, row->bm25_rank);
     break;
-  case 1: /* snippet */
-    sqlite3_result_text(ctx, row->snippet, -1, SQLITE_TRANSIENT);
+  case 1: /* text */
+    sqlite3_result_text(ctx, row->text, -1, SQLITE_TRANSIENT);
     break;
   case 2: /* k (input-only) */
   case 3: /* mmr_lambda (input-only) */

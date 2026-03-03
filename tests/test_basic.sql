@@ -19,44 +19,44 @@ CREATE VIRTUAL TABLE test_fts_mmr USING jaccard_mmr(test_fts, snippet(test_fts, 
 
 -- Test 1: basic query without MMR (lambda=1.0 = pure relevance)
 SELECT 'TEST 1: pure relevance (lambda=1.0)';
-SELECT rowid, rank, snippet FROM test_fts_mmr
-  WHERE snippet MATCH 'cat' AND k = 5 AND mmr_lambda = 1.0;
+SELECT rowid, rank, text FROM test_fts_mmr
+  WHERE text MATCH 'cat' AND k = 5 AND mmr_lambda = 1.0;
 
 -- Test 2: MMR diversity (lambda=0.5)
 SELECT '';
 SELECT 'TEST 2: MMR diversity (lambda=0.5)';
-SELECT rowid, rank, snippet FROM test_fts_mmr
-  WHERE snippet MATCH 'cat' AND k = 5 AND mmr_lambda = 0.5;
+SELECT rowid, rank, text FROM test_fts_mmr
+  WHERE text MATCH 'cat' AND k = 5 AND mmr_lambda = 0.5;
 
 -- Test 3: k=3 limit
 SELECT '';
 SELECT 'TEST 3: k=3 limit';
-SELECT rowid, rank, snippet FROM test_fts_mmr
-  WHERE snippet MATCH 'care' AND k = 3 AND mmr_lambda = 1.0;
+SELECT rowid, rank, text FROM test_fts_mmr
+  WHERE text MATCH 'care' AND k = 3 AND mmr_lambda = 1.0;
 
 -- Test 4: no results
 SELECT '';
 SELECT 'TEST 4: no results';
-SELECT rowid, rank, snippet FROM test_fts_mmr
-  WHERE snippet MATCH 'zebra' AND k = 5 AND mmr_lambda = 0.5;
+SELECT rowid, rank, text FROM test_fts_mmr
+  WHERE text MATCH 'zebra' AND k = 5 AND mmr_lambda = 0.5;
 
 -- Test 5: pure diversity (lambda=0.0)
 SELECT '';
 SELECT 'TEST 5: pure diversity (lambda=0.0)';
-SELECT rowid, rank, snippet FROM test_fts_mmr
-  WHERE snippet MATCH 'cat' AND k = 5 AND mmr_lambda = 0.0;
+SELECT rowid, rank, text FROM test_fts_mmr
+  WHERE text MATCH 'cat' AND k = 5 AND mmr_lambda = 0.0;
 
 -- Test 6: k > candidates (should return all available)
 SELECT '';
 SELECT 'TEST 6: k > total matches';
-SELECT rowid, rank, snippet FROM test_fts_mmr
-  WHERE snippet MATCH 'fish' AND k = 10 AND mmr_lambda = 0.5;
+SELECT rowid, rank, text FROM test_fts_mmr
+  WHERE text MATCH 'fish' AND k = 10 AND mmr_lambda = 0.5;
 
 -- Test 7: default mmr_lambda (omitted = 1.0)
 SELECT '';
 SELECT 'TEST 7: mmr_lambda omitted (default 1.0)';
-SELECT rowid, rank, snippet FROM test_fts_mmr
-  WHERE snippet MATCH 'care' AND k = 3;
+SELECT rowid, rank, text FROM test_fts_mmr
+  WHERE text MATCH 'care' AND k = 3;
 
 SELECT '';
 SELECT 'ALL TESTS PASSED';

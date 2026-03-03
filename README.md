@@ -55,12 +55,12 @@ CREATE VIRTUAL TABLE docs_fts_mmr USING jaccard_mmr(
 );
 
 -- Pure relevance (lambda=1.0): same order as FTS5
-SELECT rowid, snippet FROM docs_fts_mmr
-  WHERE snippet MATCH 'cat' AND k = 5 AND mmr_lambda = 1.0;
+SELECT rowid, text FROM docs_fts_mmr
+  WHERE text MATCH 'cat' AND k = 5 AND mmr_lambda = 1.0;
 
 -- Balanced diversity (lambda=0.5): topically diverse results
-SELECT rowid, snippet FROM docs_fts_mmr
-  WHERE snippet MATCH 'cat' AND k = 5 AND mmr_lambda = 0.5;
+SELECT rowid, text FROM docs_fts_mmr
+  WHERE text MATCH 'cat' AND k = 5 AND mmr_lambda = 0.5;
 ```
 
 ## API
@@ -78,7 +78,7 @@ CREATE VIRTUAL TABLE <name> USING jaccard_mmr(
 | Parameter | Description |
 |-----------|-------------|
 | `source_table` | Name of the source table (must support `MATCH`) |
-| `text_expr` | SQL expression for the text to tokenize and return as `snippet` |
+| `text_expr` | SQL expression for the text to tokenize and return as `text` |
 | `rank_expr` | SQL expression for relevance scoring (default: `rank`) |
 
 The `text_expr` can be any valid SQL expression that produces text — a column
@@ -88,8 +88,8 @@ a query on `source_table`.
 ### Querying
 
 ```sql
-SELECT rowid, rank, snippet FROM <name>
-  WHERE snippet MATCH :query
+SELECT rowid, rank, text FROM <name>
+  WHERE text MATCH :query
     AND k = :k
     AND mmr_lambda = :lambda;
 ```
@@ -97,11 +97,11 @@ SELECT rowid, rank, snippet FROM <name>
 | Column | Type | Hidden | Description |
 |--------|------|--------|-------------|
 | `rank` | REAL | yes | Relevance score from source (via `rank_expr`) |
-| `snippet` | TEXT | no | Text from source (via `text_expr`) |
+| `text` | TEXT | no | Text from source (via `text_expr`) |
 | `k` | INT | yes | Number of results to return (required) |
 | `mmr_lambda` | REAL | yes | Diversity: `1.0` = pure relevance, `0.5` = balanced, `0.0` = pure diversity (optional, default `1.0`) |
 
-**Constraints:** `snippet MATCH` and `k` are required. `mmr_lambda` is optional.
+**Constraints:** `text MATCH` and `k` are required. `mmr_lambda` is optional.
 
 ### How MMR works
 
