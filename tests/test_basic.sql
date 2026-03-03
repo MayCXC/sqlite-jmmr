@@ -15,7 +15,7 @@ INSERT INTO test_fts(rowid, title, content) VALUES
   (9, 'cat health', 'common cat health issues and veterinary care tips'),
   (10, 'cat grooming', 'grooming tips for long hair cats and short hair cats');
 
-CREATE VIRTUAL TABLE test_fts_mmr USING jaccard_mmr(test_fts, 1);
+CREATE VIRTUAL TABLE test_fts_mmr USING jaccard_mmr(test_fts, snippet(test_fts, 1, '>>>', '<<<', '...', 16));
 
 -- Test 1: basic query without MMR (lambda=1.0 = pure relevance)
 SELECT 'TEST 1: pure relevance (lambda=1.0)';

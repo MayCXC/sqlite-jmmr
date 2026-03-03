@@ -1,12 +1,15 @@
 /*
-** sqlite-jmmr.c — Jaccard MMR virtual table wrapper for FTS5.
+** sqlite-jmmr.c — Jaccard MMR virtual table for diversity reranking.
 **
 ** Provides Jaccard-similarity-based Maximal Marginal Relevance (MMR)
-** reranking for FTS5 search results.  Mirrors the sqlite-vec mmr_lambda
-** pattern: overfetch from FTS5, rerank internally, return diversified
-** results.
+** reranking.  Wraps any MATCH-capable table (FTS5, etc.) and reranks
+** results by balancing relevance against textual diversity.
 **
-** CREATE VIRTUAL TABLE t_mmr USING jaccard_mmr(t_fts, snippet_col_idx);
+** CREATE VIRTUAL TABLE t_mmr USING jaccard_mmr(
+**     source_table,
+**     text_expr              -- SQL expression for text to tokenize
+**     [, rank_expr]          -- SQL expression for relevance (default: rank)
+** );
 **
 ** SELECT rowid, rank, snippet FROM t_mmr
 **   WHERE snippet MATCH :q AND k = :k AND mmr_lambda = :lambda;
@@ -17,7 +20,6 @@
 #include "sqlite-jmmr.h"
 
 #include <ctype.h>
-#include <math.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
@@ -174,8 +176,9 @@ static void jmmr_row_free(jmmr_row *r) {
 typedef struct jmmr_vtab {
   sqlite3_vtab base;
   sqlite3 *db;
-  char *fts_table;
-  int snippet_col;
+  char *source_table;
+  char *text_expr;
+  char *rank_expr;
 } jmmr_vtab;
 
 typedef struct jmmr_cursor {
@@ -191,20 +194,20 @@ static int jmmrInit(sqlite3 *db, void *pAux, int argc,
                     const char *const *argv, sqlite3_vtab **ppVtab,
                     char **pzErr) {
   (void)pAux;
-  if (argc < 4) {
-    *pzErr = sqlite3_mprintf("jaccard_mmr: expected (fts_table, snippet_col)");
+  if (argc < 5) {
+    *pzErr = sqlite3_mprintf(
+        "jaccard_mmr: expected (source_table, text_expr [, rank_expr])");
     return SQLITE_ERROR;
   }
 
-  const char *fts_table = argv[3];
-  int snippet_col = 0;
-  if (argc >= 5)
-    snippet_col = atoi(argv[4]);
+  const char *source_table = argv[3];
+  const char *text_expr = argv[4];
+  const char *rank_expr = (argc >= 6) ? argv[5] : "rank";
 
   /*
   ** Schema:
-  **   rank       REAL  HIDDEN  (col 0) — BM25 rank from FTS5
-  **   snippet    TEXT          (col 1) — snippet(fts, col, ...)
+  **   rank       REAL  HIDDEN  (col 0) — relevance score from source
+  **   snippet    TEXT          (col 1) — text expression result
   **   k          INT   HIDDEN  (col 2) — result count
   **   mmr_lambda REAL  HIDDEN  (col 3) — 1.0=relevance, 0.5=balanced
   */
@@ -222,10 +225,14 @@ static int jmmrInit(sqlite3 *db, void *pAux, int argc,
     return SQLITE_NOMEM;
   memset(pNew, 0, sizeof(*pNew));
   pNew->db = db;
-  pNew->fts_table = sqlite3_mprintf("%s", fts_table);
-  pNew->snippet_col = snippet_col;
+  pNew->source_table = sqlite3_mprintf("%s", source_table);
+  pNew->text_expr = sqlite3_mprintf("%s", text_expr);
+  pNew->rank_expr = sqlite3_mprintf("%s", rank_expr);
 
-  if (!pNew->fts_table) {
+  if (!pNew->source_table || !pNew->text_expr || !pNew->rank_expr) {
+    sqlite3_free(pNew->source_table);
+    sqlite3_free(pNew->text_expr);
+    sqlite3_free(pNew->rank_expr);
     sqlite3_free(pNew);
     return SQLITE_NOMEM;
   }
@@ -236,7 +243,9 @@ static int jmmrInit(sqlite3 *db, void *pAux, int argc,
 
 static int jmmrDestroy(sqlite3_vtab *pVtab) {
   jmmr_vtab *p = (jmmr_vtab *)pVtab;
-  sqlite3_free(p->fts_table);
+  sqlite3_free(p->source_table);
+  sqlite3_free(p->text_expr);
+  sqlite3_free(p->rank_expr);
   sqlite3_free(p);
   return SQLITE_OK;
 }
@@ -379,12 +388,13 @@ static int jmmrFilter(sqlite3_vtab_cursor *pCur, int idxNum,
   if (fetch_limit < k)
     fetch_limit = k;
 
-  /* Prepare internal FTS5 query */
+  /* Prepare internal query against source table */
   char *sql = sqlite3_mprintf(
-      "SELECT rowid, rank, snippet(\"%w\", %d, '>>>', '<<<', '...', 16) "
-      "FROM \"%w\" WHERE \"%w\" MATCH ?1 ORDER BY rank LIMIT %d",
-      vtab->fts_table, vtab->snippet_col, vtab->fts_table, vtab->fts_table,
-      fetch_limit);
+      "SELECT rowid, %s, %s "
+      "FROM \"%w\" WHERE \"%w\" MATCH ?1 ORDER BY %s LIMIT %d",
+      vtab->rank_expr, vtab->text_expr,
+      vtab->source_table, vtab->source_table,
+      vtab->rank_expr, fetch_limit);
   if (!sql)
     return SQLITE_NOMEM;
 
