@@ -1,5 +1,5 @@
 /*
-** sqlite-jmmr.c — Jaccard MMR virtual table for diversity reranking.
+** sqlite-jmmr.c - Jaccard MMR virtual table for diversity reranking.
 **
 ** Provides Jaccard-similarity-based Maximal Marginal Relevance (MMR)
 ** reranking.  Wraps any MATCH-capable table (FTS5, etc.) and reranks
@@ -7,8 +7,8 @@
 **
 ** CREATE VIRTUAL TABLE t_mmr USING jaccard_mmr(
 **     source_table,
-**     text_expr              -- SQL expression for text to tokenize
-**     [, rank_expr]          -- SQL expression for relevance (default: rank)
+**     text_expr,             -- SQL expression for text to tokenize
+**     rank_expr              -- SQL expression for relevance scoring
 ** );
 **
 ** SELECT rowid, rank, text FROM t_mmr
@@ -31,7 +31,7 @@ SQLITE_EXTENSION_INIT1
 #include "sqlite3.h"
 #endif
 
-/* ---- Error helper (same pattern as sqlite-vec) ----------------------- */
+/* ---- Error helper ---------------------------------------------------- */
 
 static void vtab_set_error(sqlite3_vtab *pVTab, const char *zFormat, ...) {
   va_list args;
@@ -134,7 +134,7 @@ static int jmmr_tokenset_tokenize(jmmr_tokenset *ts, const char *text) {
 
 /*
 ** Jaccard similarity between two sorted, deduplicated token sets.
-** Computed via sorted merge — O(n+m).
+** Computed via sorted merge in O(n+m).
 */
 static double jmmr_jaccard(jmmr_tokenset *a, jmmr_tokenset *b) {
   if (a->n == 0 && b->n == 0)
@@ -194,22 +194,22 @@ static int jmmrInit(sqlite3 *db, void *pAux, int argc,
                     const char *const *argv, sqlite3_vtab **ppVtab,
                     char **pzErr) {
   (void)pAux;
-  if (argc < 5) {
+  if (argc < 6) {
     *pzErr = sqlite3_mprintf(
-        "jaccard_mmr: expected (source_table, text_expr [, rank_expr])");
+        "jaccard_mmr: expected (source_table, text_expr, rank_expr)");
     return SQLITE_ERROR;
   }
 
   const char *source_table = argv[3];
   const char *text_expr = argv[4];
-  const char *rank_expr = (argc >= 6) ? argv[5] : "rank";
+  const char *rank_expr = argv[5];
 
   /*
   ** Schema:
-  **   rank       REAL  HIDDEN  (col 0) — relevance score from source
-  **   text       TEXT          (col 1) — text expression result
-  **   k          INT   HIDDEN  (col 2) — result count
-  **   mmr_lambda REAL  HIDDEN  (col 3) — 1.0=relevance, 0.5=balanced
+  **   rank       REAL  HIDDEN  (col 0)  relevance score from source
+  **   text       TEXT          (col 1)  text expression result
+  **   k          INT   HIDDEN  (col 2)  result count
+  **   mmr_lambda REAL  HIDDEN  (col 3)  1.0=relevance, 0.5=balanced
   */
   int rc = sqlite3_declare_vtab(db,
     "CREATE TABLE x("
@@ -253,7 +253,7 @@ static int jmmrDestroy(sqlite3_vtab *pVtab) {
 /* ---- xBestIndex ------------------------------------------------------ */
 
 /*
-** idxStr encoding: 4 bytes per constraint (matching sqlite-vec pattern).
+** idxStr encoding: 4 bytes per constraint.
 **   byte 0: kind character
 **   bytes 1-3: filler ('_')
 **
@@ -383,8 +383,9 @@ static int jmmrFilter(sqlite3_vtab_cursor *pCur, int idxNum,
   if (!match_text || !match_text[0])
     return SQLITE_OK;
 
-  /* Overfetch: k*5 candidates for MMR reranking */
-  int fetch_limit = (mmr_lambda < 1.0) ? k * 5 : k;
+  /* Overfetch candidates for MMR reranking */
+#define JMMR_OVERFETCH_FACTOR 5
+  int fetch_limit = (mmr_lambda < 1.0) ? k * JMMR_OVERFETCH_FACTOR : k;
   if (fetch_limit < k)
     fetch_limit = k;
 
@@ -452,7 +453,7 @@ static int jmmrFilter(sqlite3_vtab_cursor *pCur, int idxNum,
     return SQLITE_OK;
   }
 
-  /* --- MMR reranking --- */
+  /* ---- MMR reranking --------------------------------------------------- */
   if (mmr_lambda < 1.0 && n > 1) {
     /* Tokenize all text */
     for (int i = 0; i < n; i++) {
@@ -468,7 +469,7 @@ static int jmmrFilter(sqlite3_vtab_cursor *pCur, int idxNum,
     /*
     ** Normalize ranks to relevance [0, 1].
     ** Assumes lower rank = better (ORDER BY rank ASC).
-    ** Uses min-max normalization: best rank → 1.0, worst → 0.0.
+    ** Uses min-max normalization: best rank maps to 1.0, worst to 0.0.
     */
     double min_rank = rows[0].rank_value;
     double max_rank = rows[0].rank_value;

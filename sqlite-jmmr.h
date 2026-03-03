@@ -1,5 +1,5 @@
 /*
-** sqlite-jmmr.h — Jaccard MMR virtual table for diversity reranking.
+** sqlite-jmmr.h - Jaccard MMR virtual table for diversity reranking.
 **
 ** BSD 3-Clause License. See LICENSE for details.
 */
