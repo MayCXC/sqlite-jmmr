@@ -160,7 +160,7 @@ static double jmmr_jaccard(jmmr_tokenset *a, jmmr_tokenset *b) {
 
 typedef struct jmmr_row {
   sqlite3_int64 rowid;
-  double bm25_rank;
+  double rank_value;
   char *text;
   jmmr_tokenset tokens;
   int selected;
@@ -431,9 +431,9 @@ static int jmmrFilter(sqlite3_vtab_cursor *pCur, int idxNum,
       rows = p;
     }
     rows[n].rowid = sqlite3_column_int64(stmt, 0);
-    rows[n].bm25_rank = sqlite3_column_double(stmt, 1);
-    const char *snip = (const char *)sqlite3_column_text(stmt, 2);
-    rows[n].text = sqlite3_mprintf("%s", snip ? snip : "");
+    rows[n].rank_value = sqlite3_column_double(stmt, 1);
+    const char *txt = (const char *)sqlite3_column_text(stmt, 2);
+    rows[n].text = sqlite3_mprintf("%s", txt ? txt : "");
     jmmr_tokenset_init(&rows[n].tokens);
     rows[n].selected = 0;
     if (!rows[n].text) {
@@ -466,14 +466,19 @@ static int jmmrFilter(sqlite3_vtab_cursor *pCur, int idxNum,
     }
 
     /*
-    ** Normalize BM25 ranks to relevance [0, 1].
-    ** BM25 rank is negative (lower = better).  Find the minimum (most
-    ** negative) and normalize: relevance = 1.0 - rank/min_rank.
+    ** Normalize ranks to relevance [0, 1].
+    ** Assumes lower rank = better (ORDER BY rank ASC).
+    ** Uses min-max normalization: best rank → 1.0, worst → 0.0.
     */
-    double min_rank = rows[0].bm25_rank;
-    for (int i = 1; i < n; i++)
-      if (rows[i].bm25_rank < min_rank)
-        min_rank = rows[i].bm25_rank;
+    double min_rank = rows[0].rank_value;
+    double max_rank = rows[0].rank_value;
+    for (int i = 1; i < n; i++) {
+      if (rows[i].rank_value < min_rank)
+        min_rank = rows[i].rank_value;
+      if (rows[i].rank_value > max_rank)
+        max_rank = rows[i].rank_value;
+    }
+    double range = max_rank - min_rank;
 
     double *relevance = sqlite3_malloc(n * sizeof(double));
     if (!relevance) {
@@ -484,7 +489,7 @@ static int jmmrFilter(sqlite3_vtab_cursor *pCur, int idxNum,
     }
     for (int i = 0; i < n; i++) {
       relevance[i] =
-          (min_rank < 0.0) ? 1.0 - (rows[i].bm25_rank / min_rank) : 1.0;
+          (range > 0.0) ? (max_rank - rows[i].rank_value) / range : 1.0;
     }
 
     /* Greedy MMR selection */
@@ -555,7 +560,7 @@ static int jmmrFilter(sqlite3_vtab_cursor *pCur, int idxNum,
     rows = reordered;
     n = selected_count;
   } else {
-    /* No MMR: just take top k by rank (already sorted by FTS5) */
+    /* No MMR: just take top k by rank (already sorted by source) */
     if (n > k) {
       for (int i = k; i < n; i++)
         jmmr_row_free(&rows[i]);
@@ -591,7 +596,7 @@ static int jmmrColumn(sqlite3_vtab_cursor *pCur, sqlite3_context *ctx,
       &((jmmr_cursor *)pCur)->rows[((jmmr_cursor *)pCur)->current];
   switch (col) {
   case 0: /* rank */
-    sqlite3_result_double(ctx, row->bm25_rank);
+    sqlite3_result_double(ctx, row->rank_value);
     break;
   case 1: /* text */
     sqlite3_result_text(ctx, row->text, -1, SQLITE_TRANSIENT);

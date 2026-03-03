@@ -22,7 +22,7 @@
   #endif
 #endif
 
-#define SQLITE_JMMR_VERSION "v0.1.0"
+#define SQLITE_JMMR_VERSION "v1.0.0"
 
 #ifdef __cplusplus
 extern "C" {
