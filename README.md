@@ -1,57 +1,73 @@
-# `sqlite-jmmr`
+# `sqlite-mmr`
 
-Jaccard-based Maximal Marginal Relevance (MMR) reranking for SQLite. Wraps any
-MATCH-capable table (FTS5, etc.) with a diversity-aware reranker using a hidden
-`mmr_lambda` column.
+A small SQLite extension for Maximal Marginal Relevance (MMR) reranking,
+Jaccard similarity, and FTS5 token extraction.
 
-Relevance-ranked search tends to cluster similar documents at the top.
-`sqlite-jmmr` overfetches candidates, tokenizes each result, computes pairwise
-Jaccard similarity, and greedily selects a diverse subset. The `mmr_lambda`
-parameter controls the tradeoff: `1.0` for pure relevance, `0.0` for pure
-diversity, `0.5` for balanced.
+- Wraps any MATCH-capable table (FTS5, etc.) with a diversity-aware reranker
+- Overfetches candidates, tokenizes text, and uses greedy MMR to promote topical variety
+- `match_tokens(fts)`: FTS5 auxiliary function that reads matched tokens from the index (no content decompression)
+- `tokenize(text)`: scalar function returning sorted deduplicated lowercase tokens
+- `jaccard(a, b)`: scalar function computing Jaccard similarity on token strings
+- Written in pure C, no dependencies beyond SQLite
+- Single file (`sqlite-mmr.c`), compiles to a ~20KB shared library
 
-- Works with `snippet()`, plain columns, or any SQL expression as text source
-- Pure C, no dependencies beyond SQLite, runs anywhere SQLite runs
-- Single file, compiles to a ~20KB shared library
+## The problem
 
-## Usage
+Search engines rank results by relevance, which tends to cluster topically
+similar documents at the top. If your top 10 results for "memory" are all
+slight variations of the same page, you're missing useful results further down
+the list.
+
+## The solution
+
+`sqlite-mmr` provides a virtual table wrapper that sits on top of any
+MATCH-capable source table. It overfetches candidates, computes pairwise
+Jaccard similarity between token sets, and runs a greedy MMR selection loop
+to balance relevance against diversity.
+
+For FTS5, `match_tokens(fts)` reads matched tokens directly from the inverted
+index via `xInstToken`, avoiding content decompression entirely. This makes
+MMR reranking fast even on large compressed archives.
+
+## Sample usage
 
 ```sql
-.load ./jmmr0
+.load ./mmr0
 
-CREATE VIRTUAL TABLE docs_fts USING fts5(title, body);
+CREATE VIRTUAL TABLE docs USING fts5(body);
 
-INSERT INTO docs_fts(rowid, title, body) VALUES
-  (1, 'cat care',     'how to take care of your cat and keep them healthy'),
-  (2, 'cat food',     'best cat food brands for indoor cats and kittens'),
-  (3, 'cat toys',     'fun cat toys and games for cats to play with'),
-  (4, 'dog care',     'how to take care of your dog and keep them healthy'),
-  (5, 'cat breeds',   'popular cat breeds like siamese persian and maine coon'),
-  (6, 'cat health',   'common cat health issues and veterinary care tips'),
-  (7, 'cat grooming', 'grooming tips for long hair cats and short hair cats');
+INSERT INTO docs(rowid, body) VALUES
+  (1, 'how to take care of your cat and keep them healthy'),
+  (2, 'best cat food brands for indoor cats and kittens'),
+  (3, 'fun cat toys and games for cats to play with'),
+  (4, 'how to take care of your dog and keep them healthy'),
+  (5, 'popular cat breeds like siamese persian and maine coon'),
+  (6, 'common cat health issues and veterinary care tips'),
+  (7, 'grooming tips for long hair cats and short hair cats');
 
--- Create the wrapper table (text_expr = snippet on body column)
-CREATE VIRTUAL TABLE docs_fts_mmr USING jaccard_mmr(
-  docs_fts,
-  snippet(docs_fts, 1, '>>>', '<<<', '...', 16),
+CREATE VIRTUAL TABLE docs_mmr USING mmr(
+  docs,
+  match_tokens(docs),
   rank
 );
 
--- Pure relevance (lambda=1.0): same order as FTS5
-SELECT rowid, text FROM docs_fts_mmr
+SELECT rowid, text FROM docs_mmr
   WHERE text MATCH 'cat' AND k = 5 AND mmr_lambda = 1.0;
 
--- Balanced (lambda=0.5): diverse results
-SELECT rowid, text FROM docs_fts_mmr
+SELECT rowid, text FROM docs_mmr
   WHERE text MATCH 'cat' AND k = 5 AND mmr_lambda = 0.5;
+
+SELECT tokenize('Hello World hello');         -- 'hello world'
+SELECT jaccard('a b c', 'b c d');             -- 0.5
+SELECT match_tokens(docs) FROM docs WHERE docs MATCH 'cat';
 ```
 
 ## API
 
-### Creating a wrapper table
+### Virtual table
 
 ```sql
-CREATE VIRTUAL TABLE <name> USING jaccard_mmr(
+CREATE VIRTUAL TABLE <name> USING mmr(
     <source_table>,
     <text_expr>,
     <rank_expr>
@@ -61,50 +77,50 @@ CREATE VIRTUAL TABLE <name> USING jaccard_mmr(
 | Parameter | Description |
 |-----------|-------------|
 | `source_table` | Name of the source table (must support `MATCH`) |
-| `text_expr` | SQL expression for the text to tokenize and return as `text` |
+| `text_expr` | SQL expression for similarity input (e.g., `match_tokens(fts)`, `snippet()`, column name) |
 | `rank_expr` | SQL expression for relevance scoring |
 
-`text_expr` can be any SQL expression that produces text: a column name,
-`snippet()`, string concatenation, etc. Evaluated in the context of a query on
-`source_table`.
-
-### Querying
-
-```sql
-SELECT rowid, rank, text FROM <name>
-  WHERE text MATCH :query
-    AND k = :k
-    AND mmr_lambda = :lambda;
-```
+### Query columns
 
 | Column | Type | Hidden | Description |
 |--------|------|--------|-------------|
-| `rank` | REAL | yes | Relevance score from source (via `rank_expr`) |
+| `rank` | REAL | yes | Relevance score from source |
 | `text` | TEXT | no | Text from source (via `text_expr`) |
 | `k` | INT | yes | Number of results to return (required) |
-| `mmr_lambda` | REAL | yes | `1.0` = pure relevance, `0.5` = balanced, `0.0` = pure diversity (optional, default `1.0`) |
+| `mmr_lambda` | REAL | yes | `1.0` = pure relevance, `0.5` = balanced, `0.0` = pure diversity (default `1.0`) |
 
-`text MATCH` and `k` are required. `mmr_lambda` is optional.
+### Scalar functions
 
-### How it works
+| Function | Description |
+|----------|-------------|
+| `tokenize(text)` | Returns sorted, deduplicated, lowercase tokens separated by spaces |
+| `jaccard(a, b)` | Jaccard similarity between two space-separated token strings |
+
+### FTS5 auxiliary function
+
+| Function | Description |
+|----------|-------------|
+| `match_tokens(fts)` | Returns space-separated unique matched tokens from the FTS5 index via `xInstToken`. No content decompression. |
+
+### How MMR works
 
 When `mmr_lambda < 1.0`:
 
 1. Overfetch `k * 5` candidates from source table
 2. Tokenize each text result (lowercase, split on non-alphanumeric, deduplicate)
 3. Normalize ranks to relevance scores in `[0, 1]`
-4. Greedy selection: pick the unselected candidate maximizing:
+4. Greedy selection loop picks the candidate maximizing:
 
    `score = lambda * relevance - (1 - lambda) * max_jaccard_to_selected`
 
 5. Return the top `k` selected rows
 
-When `mmr_lambda >= 1.0`: returns top `k` by rank directly, no reranking.
+When `mmr_lambda >= 1.0`: no reranking, returns top `k` by rank directly.
 
 ## Building
 
 ```sh
-make            # builds jmmr0.so (or jmmr0.dylib on macOS)
+make            # builds mmr0.so (or mmr0.dylib on macOS)
 make test       # runs smoke tests
 make install    # installs to /usr/local/lib and /usr/local/include
 ```
@@ -114,7 +130,7 @@ Requires a C compiler and SQLite development headers (`sqlite3ext.h`).
 For static linking:
 
 ```sh
-make static     # compiles sqlite-jmmr.o with -DSQLITE_CORE
+make static     # compiles sqlite-mmr.o with -DSQLITE_CORE
 ```
 
 ## License
