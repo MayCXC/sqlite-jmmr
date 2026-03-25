@@ -6,8 +6,8 @@ Jaccard similarity, and FTS5 token extraction.
 - Wraps any MATCH-capable table (FTS5, etc.) with a diversity-aware reranker
 - Overfetches candidates, tokenizes text, and uses greedy MMR to promote topical variety
 - `match_tokens(fts)`: FTS5 auxiliary function that reads matched tokens from the index (no content decompression)
-- `tokenize(text)`: scalar function returning sorted deduplicated lowercase tokens
-- `jaccard(a, b)`: scalar function computing Jaccard similarity on token strings
+- `tokenize(text)`: scalar function returning lowercase tokens in encounter order (no sort/dedup)
+- `jaccard(a, b)`: scalar function that sorts and deduplicates both inputs, then computes Jaccard similarity
 - Written in pure C, no dependencies beyond SQLite
 - Single file (`sqlite-mmr.c`), compiles to a ~20KB shared library
 
@@ -57,8 +57,8 @@ SELECT rowid, text FROM docs_mmr
 SELECT rowid, text FROM docs_mmr
   WHERE text MATCH 'cat' AND k = 5 AND mmr_lambda = 0.5;
 
-SELECT tokenize('Hello World hello');         -- 'hello world'
-SELECT jaccard('a b c', 'b c d');             -- 0.5
+SELECT tokenize('Hello World hello');         -- 'hello world hello'
+SELECT jaccard('hello world hello', 'world test');  -- 0.333 (dedupes internally)
 SELECT match_tokens(docs) FROM docs WHERE docs MATCH 'cat';
 ```
 
@@ -93,14 +93,14 @@ CREATE VIRTUAL TABLE <name> USING mmr(
 
 | Function | Description |
 |----------|-------------|
-| `tokenize(text)` | Returns sorted, deduplicated, lowercase tokens separated by spaces |
-| `jaccard(a, b)` | Jaccard similarity between two space-separated token strings |
+| `tokenize(text)` | Lowercase tokens in encounter order, separated by spaces (no sort/dedup) |
+| `jaccard(a, b)` | Sorts and deduplicates both inputs, then computes `\|intersection\| / \|union\|` |
 
 ### FTS5 auxiliary function
 
 | Function | Description |
 |----------|-------------|
-| `match_tokens(fts)` | Returns space-separated unique matched tokens from the FTS5 index via `xInstToken`. No content decompression. |
+| `match_tokens(fts)` | Unique matched tokens from the FTS5 index via `xInstToken` (sorted, deduped). No content decompression. |
 
 ### How MMR works
 
