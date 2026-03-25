@@ -1,11 +1,11 @@
 /*
-** sqlite-jmmr.c - Jaccard MMR virtual table for diversity reranking.
+** sqlite-mmr.c - Jaccard MMR virtual table for diversity reranking.
 **
 ** Provides Jaccard-similarity-based Maximal Marginal Relevance (MMR)
 ** reranking.  Wraps any MATCH-capable table (FTS5, etc.) and reranks
 ** results by balancing relevance against textual diversity.
 **
-** CREATE VIRTUAL TABLE t_mmr USING jaccard_mmr(
+** CREATE VIRTUAL TABLE t_mmr USING mmr(
 **     source_table,
 **     text_expr,             -- SQL expression for text to tokenize
 **     rank_expr              -- SQL expression for relevance scoring
@@ -17,7 +17,7 @@
 ** BSD 3-Clause License. See LICENSE for details.
 */
 
-#include "sqlite-jmmr.h"
+#include "sqlite-mmr.h"
 
 #include <ctype.h>
 #include <stdarg.h>
@@ -43,19 +43,19 @@ static void vtab_set_error(sqlite3_vtab *pVTab, const char *zFormat, ...) {
 
 /* ---- Token set -------------------------------------------------------- */
 
-typedef struct jmmr_tokenset {
+typedef struct mmr_tokenset {
   char **tokens;
   int n;
   int cap;
-} jmmr_tokenset;
+} mmr_tokenset;
 
-static void jmmr_tokenset_init(jmmr_tokenset *ts) {
+static void mmr_tokenset_init(mmr_tokenset *ts) {
   ts->tokens = NULL;
   ts->n = 0;
   ts->cap = 0;
 }
 
-static void jmmr_tokenset_free(jmmr_tokenset *ts) {
+static void mmr_tokenset_free(mmr_tokenset *ts) {
   for (int i = 0; i < ts->n; i++)
     sqlite3_free(ts->tokens[i]);
   sqlite3_free(ts->tokens);
@@ -63,7 +63,7 @@ static void jmmr_tokenset_free(jmmr_tokenset *ts) {
   ts->n = ts->cap = 0;
 }
 
-static int jmmr_tokenset_push(jmmr_tokenset *ts, const char *tok, int len) {
+static int mmr_tokenset_push(mmr_tokenset *ts, const char *tok, int len) {
   if (ts->n >= ts->cap) {
     int newcap = ts->cap ? ts->cap * 2 : 16;
     char **p = sqlite3_realloc(ts->tokens, newcap * sizeof(char *));
@@ -86,9 +86,10 @@ static int cmp_str(const void *a, const void *b) {
 }
 
 /*
-** Tokenize text: lowercase, split on non-alnum/underscore, dedup via sort.
+** Tokenize text: lowercase, split on non-alnum/underscore.
+** Does NOT sort or dedup. Use mmr_tokenset_sort_dedup after if needed.
 */
-static int jmmr_tokenset_tokenize(jmmr_tokenset *ts, const char *text) {
+static int mmr_tokenset_tokenize(mmr_tokenset *ts, const char *text) {
   if (!text)
     return SQLITE_OK;
   const char *p = text;
@@ -108,14 +109,19 @@ static int jmmr_tokenset_tokenize(jmmr_tokenset *ts, const char *text) {
       len = 255;
     for (int i = 0; i < len; i++)
       buf[i] = (char)tolower((unsigned char)start[i]);
-    int rc = jmmr_tokenset_push(ts, buf, len);
+    int rc = mmr_tokenset_push(ts, buf, len);
     if (rc != SQLITE_OK)
       return rc;
   }
-  /* sort */
+  return SQLITE_OK;
+}
+
+/*
+** Sort and deduplicate a tokenset in place.
+*/
+static void mmr_tokenset_sort_dedup(mmr_tokenset *ts) {
   if (ts->n > 1)
     qsort(ts->tokens, ts->n, sizeof(char *), cmp_str);
-  /* dedup (adjacent unique) */
   if (ts->n > 0) {
     int w = 1;
     for (int r = 1; r < ts->n; r++) {
@@ -129,14 +135,15 @@ static int jmmr_tokenset_tokenize(jmmr_tokenset *ts, const char *text) {
     }
     ts->n = w;
   }
-  return SQLITE_OK;
 }
 
 /*
-** Jaccard similarity between two sorted, deduplicated token sets.
-** Computed via sorted merge in O(n+m).
+** Jaccard similarity between two token sets.
+** Sorts and deduplicates both inputs, then computes via sorted merge.
 */
-static double jmmr_jaccard(jmmr_tokenset *a, jmmr_tokenset *b) {
+static double mmr_jaccard(mmr_tokenset *a, mmr_tokenset *b) {
+  mmr_tokenset_sort_dedup(a);
+  mmr_tokenset_sort_dedup(b);
   if (a->n == 0 && b->n == 0)
     return 0.0;
   int i = 0, j = 0, inter = 0;
@@ -158,45 +165,45 @@ static double jmmr_jaccard(jmmr_tokenset *a, jmmr_tokenset *b) {
 
 /* ---- Row buffer ------------------------------------------------------- */
 
-typedef struct jmmr_row {
+typedef struct mmr_row {
   sqlite3_int64 rowid;
   double rank_value;
   char *text;
-  jmmr_tokenset tokens;
+  mmr_tokenset tokens;
   int selected;
-} jmmr_row;
+} mmr_row;
 
-static void jmmr_row_free(jmmr_row *r) {
+static void mmr_row_free(mmr_row *r) {
   sqlite3_free(r->text);
-  jmmr_tokenset_free(&r->tokens);
+  mmr_tokenset_free(&r->tokens);
 }
 
 /* ---- Virtual table ---------------------------------------------------- */
 
-typedef struct jmmr_vtab {
+typedef struct mmr_vtab {
   sqlite3_vtab base;
   sqlite3 *db;
   char *source_table;
   char *text_expr;
   char *rank_expr;
-} jmmr_vtab;
+} mmr_vtab;
 
-typedef struct jmmr_cursor {
+typedef struct mmr_cursor {
   sqlite3_vtab_cursor base;
-  jmmr_row *rows;
+  mmr_row *rows;
   int n_rows;
   int current;
-} jmmr_cursor;
+} mmr_cursor;
 
 /* ---- xCreate / xConnect ---------------------------------------------- */
 
-static int jmmrInit(sqlite3 *db, void *pAux, int argc,
+static int mmrInit(sqlite3 *db, void *pAux, int argc,
                     const char *const *argv, sqlite3_vtab **ppVtab,
                     char **pzErr) {
   (void)pAux;
   if (argc < 6) {
     *pzErr = sqlite3_mprintf(
-        "jaccard_mmr: expected (source_table, text_expr, rank_expr)");
+        "mmr: expected (source_table, text_expr, rank_expr)");
     return SQLITE_ERROR;
   }
 
@@ -220,7 +227,7 @@ static int jmmrInit(sqlite3 *db, void *pAux, int argc,
   if (rc != SQLITE_OK)
     return rc;
 
-  jmmr_vtab *pNew = sqlite3_malloc(sizeof(*pNew));
+  mmr_vtab *pNew = sqlite3_malloc(sizeof(*pNew));
   if (!pNew)
     return SQLITE_NOMEM;
   memset(pNew, 0, sizeof(*pNew));
@@ -241,8 +248,8 @@ static int jmmrInit(sqlite3 *db, void *pAux, int argc,
   return SQLITE_OK;
 }
 
-static int jmmrDestroy(sqlite3_vtab *pVtab) {
-  jmmr_vtab *p = (jmmr_vtab *)pVtab;
+static int mmrDestroy(sqlite3_vtab *pVtab) {
+  mmr_vtab *p = (mmr_vtab *)pVtab;
   sqlite3_free(p->source_table);
   sqlite3_free(p->text_expr);
   sqlite3_free(p->rank_expr);
@@ -265,11 +272,11 @@ static int jmmrDestroy(sqlite3_vtab *pVtab) {
 ** MATCH + k are required.  mmr_lambda is optional (default 1.0).
 */
 
-#define JMMR_IDXSTR_KIND_MATCH  'M'
-#define JMMR_IDXSTR_KIND_K      'K'
-#define JMMR_IDXSTR_KIND_LAMBDA 'L'
+#define MMR_IDXSTR_KIND_MATCH  'M'
+#define MMR_IDXSTR_KIND_K      'K'
+#define MMR_IDXSTR_KIND_LAMBDA 'L'
 
-static int jmmrBestIndex(sqlite3_vtab *pVtab, sqlite3_index_info *pInfo) {
+static int mmrBestIndex(sqlite3_vtab *pVtab, sqlite3_index_info *pInfo) {
   (void)pVtab;
   int iMatch = -1, iK = -1, iLambda = -1;
 
@@ -297,18 +304,18 @@ static int jmmrBestIndex(sqlite3_vtab *pVtab, sqlite3_index_info *pInfo) {
   sqlite3_str *idxStr = sqlite3_str_new(NULL);
   int argvIndex = 1;
 
-  sqlite3_str_appendchar(idxStr, 1, JMMR_IDXSTR_KIND_MATCH);
+  sqlite3_str_appendchar(idxStr, 1, MMR_IDXSTR_KIND_MATCH);
   sqlite3_str_appendchar(idxStr, 3, '_');
   pInfo->aConstraintUsage[iMatch].argvIndex = argvIndex++;
   pInfo->aConstraintUsage[iMatch].omit = 1;
 
-  sqlite3_str_appendchar(idxStr, 1, JMMR_IDXSTR_KIND_K);
+  sqlite3_str_appendchar(idxStr, 1, MMR_IDXSTR_KIND_K);
   sqlite3_str_appendchar(idxStr, 3, '_');
   pInfo->aConstraintUsage[iK].argvIndex = argvIndex++;
   pInfo->aConstraintUsage[iK].omit = 1;
 
   if (iLambda >= 0) {
-    sqlite3_str_appendchar(idxStr, 1, JMMR_IDXSTR_KIND_LAMBDA);
+    sqlite3_str_appendchar(idxStr, 1, MMR_IDXSTR_KIND_LAMBDA);
     sqlite3_str_appendchar(idxStr, 3, '_');
     pInfo->aConstraintUsage[iLambda].argvIndex = argvIndex++;
     pInfo->aConstraintUsage[iLambda].omit = 1;
@@ -323,9 +330,9 @@ static int jmmrBestIndex(sqlite3_vtab *pVtab, sqlite3_index_info *pInfo) {
 
 /* ---- xOpen / xClose -------------------------------------------------- */
 
-static int jmmrOpen(sqlite3_vtab *pVtab, sqlite3_vtab_cursor **ppCur) {
+static int mmrOpen(sqlite3_vtab *pVtab, sqlite3_vtab_cursor **ppCur) {
   (void)pVtab;
-  jmmr_cursor *pCur = sqlite3_malloc(sizeof(*pCur));
+  mmr_cursor *pCur = sqlite3_malloc(sizeof(*pCur));
   if (!pCur)
     return SQLITE_NOMEM;
   memset(pCur, 0, sizeof(*pCur));
@@ -333,10 +340,10 @@ static int jmmrOpen(sqlite3_vtab *pVtab, sqlite3_vtab_cursor **ppCur) {
   return SQLITE_OK;
 }
 
-static int jmmrClose(sqlite3_vtab_cursor *pCur) {
-  jmmr_cursor *p = (jmmr_cursor *)pCur;
+static int mmrClose(sqlite3_vtab_cursor *pCur) {
+  mmr_cursor *p = (mmr_cursor *)pCur;
   for (int i = 0; i < p->n_rows; i++)
-    jmmr_row_free(&p->rows[i]);
+    mmr_row_free(&p->rows[i]);
   sqlite3_free(p->rows);
   sqlite3_free(p);
   return SQLITE_OK;
@@ -344,15 +351,15 @@ static int jmmrClose(sqlite3_vtab_cursor *pCur) {
 
 /* ---- xFilter (main query logic) -------------------------------------- */
 
-static int jmmrFilter(sqlite3_vtab_cursor *pCur, int idxNum,
+static int mmrFilter(sqlite3_vtab_cursor *pCur, int idxNum,
                       const char *idxStr, int argc, sqlite3_value **argv) {
   (void)idxNum;
-  jmmr_cursor *cur = (jmmr_cursor *)pCur;
-  jmmr_vtab *vtab = (jmmr_vtab *)pCur->pVtab;
+  mmr_cursor *cur = (mmr_cursor *)pCur;
+  mmr_vtab *vtab = (mmr_vtab *)pCur->pVtab;
 
   /* Free any previous results */
   for (int i = 0; i < cur->n_rows; i++)
-    jmmr_row_free(&cur->rows[i]);
+    mmr_row_free(&cur->rows[i]);
   sqlite3_free(cur->rows);
   cur->rows = NULL;
   cur->n_rows = 0;
@@ -366,15 +373,15 @@ static int jmmrFilter(sqlite3_vtab_cursor *pCur, int idxNum,
   for (int i = 0; i < argc; i++) {
     char kind = idxStr[i * 4];
     switch (kind) {
-    case JMMR_IDXSTR_KIND_MATCH:
+    case MMR_IDXSTR_KIND_MATCH:
       match_text = (const char *)sqlite3_value_text(argv[i]);
       break;
-    case JMMR_IDXSTR_KIND_K:
+    case MMR_IDXSTR_KIND_K:
       k = sqlite3_value_int(argv[i]);
       if (k < 1)
         k = 1;
       break;
-    case JMMR_IDXSTR_KIND_LAMBDA:
+    case MMR_IDXSTR_KIND_LAMBDA:
       mmr_lambda = sqlite3_value_double(argv[i]);
       break;
     }
@@ -384,8 +391,8 @@ static int jmmrFilter(sqlite3_vtab_cursor *pCur, int idxNum,
     return SQLITE_OK;
 
   /* Overfetch candidates for MMR reranking */
-#define JMMR_OVERFETCH_FACTOR 5
-  int fetch_limit = (mmr_lambda < 1.0) ? k * JMMR_OVERFETCH_FACTOR : k;
+#define MMR_OVERFETCH_FACTOR 5
+  int fetch_limit = (mmr_lambda < 1.0) ? k * MMR_OVERFETCH_FACTOR : k;
   if (fetch_limit < k)
     fetch_limit = k;
 
@@ -411,7 +418,7 @@ static int jmmrFilter(sqlite3_vtab_cursor *pCur, int idxNum,
 
   /* Fetch all candidates */
   int cap = fetch_limit > 0 ? fetch_limit : 64;
-  jmmr_row *rows = sqlite3_malloc(cap * sizeof(jmmr_row));
+  mmr_row *rows = sqlite3_malloc(cap * sizeof(mmr_row));
   if (!rows) {
     sqlite3_finalize(stmt);
     return SQLITE_NOMEM;
@@ -421,10 +428,10 @@ static int jmmrFilter(sqlite3_vtab_cursor *pCur, int idxNum,
   while (sqlite3_step(stmt) == SQLITE_ROW) {
     if (n >= cap) {
       cap *= 2;
-      jmmr_row *p = sqlite3_realloc(rows, cap * sizeof(jmmr_row));
+      mmr_row *p = sqlite3_realloc(rows, cap * sizeof(mmr_row));
       if (!p) {
         for (int i = 0; i < n; i++)
-          jmmr_row_free(&rows[i]);
+          mmr_row_free(&rows[i]);
         sqlite3_free(rows);
         sqlite3_finalize(stmt);
         return SQLITE_NOMEM;
@@ -435,11 +442,11 @@ static int jmmrFilter(sqlite3_vtab_cursor *pCur, int idxNum,
     rows[n].rank_value = sqlite3_column_double(stmt, 1);
     const char *txt = (const char *)sqlite3_column_text(stmt, 2);
     rows[n].text = sqlite3_mprintf("%s", txt ? txt : "");
-    jmmr_tokenset_init(&rows[n].tokens);
+    mmr_tokenset_init(&rows[n].tokens);
     rows[n].selected = 0;
     if (!rows[n].text) {
       for (int i = 0; i < n; i++)
-        jmmr_row_free(&rows[i]);
+        mmr_row_free(&rows[i]);
       sqlite3_free(rows);
       sqlite3_finalize(stmt);
       return SQLITE_NOMEM;
@@ -457,10 +464,10 @@ static int jmmrFilter(sqlite3_vtab_cursor *pCur, int idxNum,
   if (mmr_lambda < 1.0 && n > 1) {
     /* Tokenize all text */
     for (int i = 0; i < n; i++) {
-      rc = jmmr_tokenset_tokenize(&rows[i].tokens, rows[i].text);
+      rc = mmr_tokenset_tokenize(&rows[i].tokens, rows[i].text);
       if (rc != SQLITE_OK) {
         for (int j = 0; j < n; j++)
-          jmmr_row_free(&rows[j]);
+          mmr_row_free(&rows[j]);
         sqlite3_free(rows);
         return rc;
       }
@@ -484,7 +491,7 @@ static int jmmrFilter(sqlite3_vtab_cursor *pCur, int idxNum,
     double *relevance = sqlite3_malloc(n * sizeof(double));
     if (!relevance) {
       for (int i = 0; i < n; i++)
-        jmmr_row_free(&rows[i]);
+        mmr_row_free(&rows[i]);
       sqlite3_free(rows);
       return SQLITE_NOMEM;
     }
@@ -499,7 +506,7 @@ static int jmmrFilter(sqlite3_vtab_cursor *pCur, int idxNum,
     if (!order) {
       sqlite3_free(relevance);
       for (int i = 0; i < n; i++)
-        jmmr_row_free(&rows[i]);
+        mmr_row_free(&rows[i]);
       sqlite3_free(rows);
       return SQLITE_NOMEM;
     }
@@ -517,7 +524,7 @@ static int jmmrFilter(sqlite3_vtab_cursor *pCur, int idxNum,
         double max_sim = 0.0;
         for (int s = 0; s < selected_count; s++) {
           double sim =
-              jmmr_jaccard(&rows[i].tokens, &rows[order[s]].tokens);
+              mmr_jaccard(&rows[i].tokens, &rows[order[s]].tokens);
           if (sim > max_sim)
             max_sim = sim;
         }
@@ -538,12 +545,12 @@ static int jmmrFilter(sqlite3_vtab_cursor *pCur, int idxNum,
     }
 
     /* Compact: reorder rows[] to selected order */
-    jmmr_row *reordered = sqlite3_malloc(selected_count * sizeof(jmmr_row));
+    mmr_row *reordered = sqlite3_malloc(selected_count * sizeof(mmr_row));
     if (!reordered) {
       sqlite3_free(order);
       sqlite3_free(relevance);
       for (int i = 0; i < n; i++)
-        jmmr_row_free(&rows[i]);
+        mmr_row_free(&rows[i]);
       sqlite3_free(rows);
       return SQLITE_NOMEM;
     }
@@ -553,7 +560,7 @@ static int jmmrFilter(sqlite3_vtab_cursor *pCur, int idxNum,
     /* Free unselected rows */
     for (int i = 0; i < n; i++) {
       if (!rows[i].selected)
-        jmmr_row_free(&rows[i]);
+        mmr_row_free(&rows[i]);
     }
     sqlite3_free(rows);
     sqlite3_free(order);
@@ -564,7 +571,7 @@ static int jmmrFilter(sqlite3_vtab_cursor *pCur, int idxNum,
     /* No MMR: just take top k by rank (already sorted by source) */
     if (n > k) {
       for (int i = k; i < n; i++)
-        jmmr_row_free(&rows[i]);
+        mmr_row_free(&rows[i]);
       n = k;
     }
   }
@@ -577,24 +584,24 @@ static int jmmrFilter(sqlite3_vtab_cursor *pCur, int idxNum,
 
 /* ---- Cursor navigation ----------------------------------------------- */
 
-static int jmmrEof(sqlite3_vtab_cursor *pCur) {
-  return ((jmmr_cursor *)pCur)->current >= ((jmmr_cursor *)pCur)->n_rows;
+static int mmrEof(sqlite3_vtab_cursor *pCur) {
+  return ((mmr_cursor *)pCur)->current >= ((mmr_cursor *)pCur)->n_rows;
 }
 
-static int jmmrNext(sqlite3_vtab_cursor *pCur) {
-  ((jmmr_cursor *)pCur)->current++;
+static int mmrNext(sqlite3_vtab_cursor *pCur) {
+  ((mmr_cursor *)pCur)->current++;
   return SQLITE_OK;
 }
 
-static int jmmrRowid(sqlite3_vtab_cursor *pCur, sqlite3_int64 *pRowid) {
-  *pRowid = ((jmmr_cursor *)pCur)->rows[((jmmr_cursor *)pCur)->current].rowid;
+static int mmrRowid(sqlite3_vtab_cursor *pCur, sqlite3_int64 *pRowid) {
+  *pRowid = ((mmr_cursor *)pCur)->rows[((mmr_cursor *)pCur)->current].rowid;
   return SQLITE_OK;
 }
 
-static int jmmrColumn(sqlite3_vtab_cursor *pCur, sqlite3_context *ctx,
+static int mmrColumn(sqlite3_vtab_cursor *pCur, sqlite3_context *ctx,
                       int col) {
-  jmmr_row *row =
-      &((jmmr_cursor *)pCur)->rows[((jmmr_cursor *)pCur)->current];
+  mmr_row *row =
+      &((mmr_cursor *)pCur)->rows[((mmr_cursor *)pCur)->current];
   switch (col) {
   case 0: /* rank */
     sqlite3_result_double(ctx, row->rank_value);
@@ -612,20 +619,20 @@ static int jmmrColumn(sqlite3_vtab_cursor *pCur, sqlite3_context *ctx,
 
 /* ---- Module definition ----------------------------------------------- */
 
-static sqlite3_module jmmrModule = {
+static sqlite3_module mmrModule = {
     /* iVersion    */ 0,
-    /* xCreate     */ jmmrInit,
-    /* xConnect    */ jmmrInit,
-    /* xBestIndex  */ jmmrBestIndex,
-    /* xDisconnect */ jmmrDestroy,
-    /* xDestroy    */ jmmrDestroy,
-    /* xOpen       */ jmmrOpen,
-    /* xClose      */ jmmrClose,
-    /* xFilter     */ jmmrFilter,
-    /* xNext       */ jmmrNext,
-    /* xEof        */ jmmrEof,
-    /* xColumn     */ jmmrColumn,
-    /* xRowid      */ jmmrRowid,
+    /* xCreate     */ mmrInit,
+    /* xConnect    */ mmrInit,
+    /* xBestIndex  */ mmrBestIndex,
+    /* xDisconnect */ mmrDestroy,
+    /* xDestroy    */ mmrDestroy,
+    /* xOpen       */ mmrOpen,
+    /* xClose      */ mmrClose,
+    /* xFilter     */ mmrFilter,
+    /* xNext       */ mmrNext,
+    /* xEof        */ mmrEof,
+    /* xColumn     */ mmrColumn,
+    /* xRowid      */ mmrRowid,
     /* xUpdate     */ 0,
     /* xBegin      */ 0,
     /* xSync       */ 0,
@@ -642,13 +649,162 @@ static sqlite3_module jmmrModule = {
 #endif
 };
 
+/* ---- tokenize() scalar function -------------------------------------- */
+/*
+** tokenize(text) — returns lowercase tokens separated by spaces.
+** Lexical normalization only: lowercase, split on non-alnum/underscore.
+** Does NOT sort or deduplicate (that is jaccard's job).
+*/
+static void sql_tokenize(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
+  (void)argc;
+  const char *text = (const char *)sqlite3_value_text(argv[0]);
+  mmr_tokenset ts;
+  mmr_tokenset_init(&ts);
+  mmr_tokenset_tokenize(&ts, text);
+
+  int total_len = 0;
+  for (int i = 0; i < ts.n; i++)
+    total_len += strlen(ts.tokens[i]) + 1;
+
+  if (total_len == 0) {
+    sqlite3_result_text(ctx, "", 0, SQLITE_STATIC);
+  } else {
+    char *out = sqlite3_malloc(total_len);
+    if (!out) { sqlite3_result_error_nomem(ctx); }
+    else {
+      char *p = out;
+      for (int i = 0; i < ts.n; i++) {
+        if (i > 0) *p++ = ' ';
+        int len = strlen(ts.tokens[i]);
+        memcpy(p, ts.tokens[i], len);
+        p += len;
+      }
+      *p = '\0';
+      sqlite3_result_text(ctx, out, (int)(p - out), sqlite3_free);
+    }
+  }
+  mmr_tokenset_free(&ts);
+}
+
+/* ---- jaccard() scalar function --------------------------------------- */
+/*
+** jaccard(a, b) — Jaccard similarity on two text strings.
+** Tokenizes both inputs (lowercase, split), sorts and deduplicates
+** internally, then computes |intersection| / |union|.
+*/
+static void sql_jaccard(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
+  (void)argc;
+  const char *a = (const char *)sqlite3_value_text(argv[0]);
+  const char *b = (const char *)sqlite3_value_text(argv[1]);
+  mmr_tokenset ta, tb;
+  mmr_tokenset_init(&ta);
+  mmr_tokenset_init(&tb);
+  mmr_tokenset_tokenize(&ta, a);
+  mmr_tokenset_tokenize(&tb, b);
+  sqlite3_result_double(ctx, mmr_jaccard(&ta, &tb));
+  mmr_tokenset_free(&ta);
+  mmr_tokenset_free(&tb);
+}
+
+/* ---- match_tokens() FTS5 auxiliary function --------------------------- */
+/*
+** FTS5 auxiliary: returns space-separated matched tokens from the index.
+** Uses xInstCount + xInstToken. No content decompression.
+*/
+static void sql_match_tokens(const Fts5ExtensionApi *pApi,
+                             Fts5Context *pFts,
+                             sqlite3_context *pCtx,
+                             int nVal, sqlite3_value **apVal) {
+  (void)nVal; (void)apVal;
+  int nInst = 0;
+  int rc = pApi->xInstCount(pFts, &nInst);
+  if (rc != SQLITE_OK || nInst == 0) {
+    sqlite3_result_text(pCtx, "", 0, SQLITE_STATIC);
+    return;
+  }
+
+  mmr_tokenset ts;
+  mmr_tokenset_init(&ts);
+
+  for (int i = 0; i < nInst; i++) {
+    int iPhrase, iCol, iOff;
+    rc = pApi->xInst(pFts, i, &iPhrase, &iCol, &iOff);
+    if (rc != SQLITE_OK) break;
+    int nToken = pApi->xPhraseSize(pFts, iPhrase);
+    for (int t = 0; t < nToken; t++) {
+      const char *pTok = NULL;
+      int nTok = 0;
+      rc = pApi->xInstToken(pFts, i, t, &pTok, &nTok);
+      if (rc != SQLITE_OK || !pTok) continue;
+      mmr_tokenset_push(&ts, pTok, nTok);
+    }
+  }
+
+  /* Sort and dedup for consistent output */
+  mmr_tokenset_sort_dedup(&ts);
+
+  int total_len = 0;
+  for (int i = 0; i < ts.n; i++)
+    total_len += strlen(ts.tokens[i]) + 1;
+
+  if (total_len == 0) {
+    sqlite3_result_text(pCtx, "", 0, SQLITE_STATIC);
+  } else {
+    char *out = sqlite3_malloc(total_len);
+    if (!out) { sqlite3_result_error_nomem(pCtx); }
+    else {
+      char *p = out;
+      for (int i = 0; i < ts.n; i++) {
+        if (i > 0) *p++ = ' ';
+        int len = strlen(ts.tokens[i]);
+        memcpy(p, ts.tokens[i], len);
+        p += len;
+      }
+      *p = '\0';
+      sqlite3_result_text(pCtx, out, (int)(p - out), sqlite3_free);
+    }
+  }
+  mmr_tokenset_free(&ts);
+}
+
 /* ---- Entry point ----------------------------------------------------- */
 
-SQLITE_JMMR_API int sqlite3_jmmr_init(sqlite3 *db, char **pzErrMsg,
+SQLITE_MMR_API int sqlite3_mmr_init(sqlite3 *db, char **pzErrMsg,
                                        const sqlite3_api_routines *pApi) {
   (void)pzErrMsg;
 #ifndef SQLITE_CORE
   SQLITE_EXTENSION_INIT2(pApi);
 #endif
-  return sqlite3_create_module_v2(db, "jaccard_mmr", &jmmrModule, NULL, NULL);
+
+  int rc;
+
+  /* Virtual table module */
+  rc = sqlite3_create_module_v2(db, "mmr", &mmrModule, NULL, NULL);
+  if (rc != SQLITE_OK) return rc;
+
+  /* Scalar functions */
+  rc = sqlite3_create_function(db, "tokenize", 1, SQLITE_UTF8, 0,
+                               sql_tokenize, 0, 0);
+  if (rc != SQLITE_OK) return rc;
+  rc = sqlite3_create_function(db, "jaccard", 2, SQLITE_UTF8, 0,
+                               sql_jaccard, 0, 0);
+  if (rc != SQLITE_OK) return rc;
+
+  /* FTS5 auxiliary function (match_tokens) */
+  {
+    fts5_api *fts = 0;
+    sqlite3_stmt *stmt = 0;
+    rc = sqlite3_prepare_v2(db, "SELECT fts5(?1)", -1, &stmt, 0);
+    if (rc == SQLITE_OK) {
+      sqlite3_bind_pointer(stmt, 1, &fts, "fts5_api_ptr", 0);
+      sqlite3_step(stmt);
+    }
+    sqlite3_finalize(stmt);
+    if (fts) {
+      rc = fts->xCreateFunction(fts, "match_tokens", 0, sql_match_tokens, 0);
+      if (rc != SQLITE_OK) return rc;
+    }
+  }
+
+  return SQLITE_OK;
 }
