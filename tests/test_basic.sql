@@ -1,5 +1,5 @@
--- test_basic.sql: smoke tests for sqlite-jmmr extension
--- Run: sqlite3 :memory: '.load ./jmmr0' '.read tests/test_basic.sql'
+-- test_basic.sql: smoke tests for the sqlite-mmr extension
+-- Run: sqlite3 :memory: '.load ./mmr0' '.read tests/test_basic.sql'
 
 CREATE VIRTUAL TABLE test_fts USING fts5(title, content);
 
@@ -15,7 +15,7 @@ INSERT INTO test_fts(rowid, title, content) VALUES
   (9, 'cat health', 'common cat health issues and veterinary care tips'),
   (10, 'cat grooming', 'grooming tips for long hair cats and short hair cats');
 
-CREATE VIRTUAL TABLE test_fts_mmr USING jaccard_mmr(test_fts, snippet(test_fts, 1, '>>>', '<<<', '...', 16), rank);
+CREATE VIRTUAL TABLE test_fts_mmr USING mmr(test_fts, snippet(test_fts, 1, '>>>', '<<<', '...', 16), rank);
 
 -- Test 1: basic query without MMR (lambda=1.0 = pure relevance)
 SELECT 'TEST 1: pure relevance (lambda=1.0)';

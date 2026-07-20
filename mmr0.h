@@ -1,5 +1,5 @@
 /*
-** mmr0.h — MMR diversity reranking, Jaccard similarity, FTS5 token extraction.
+** mmr0.h: MMR diversity reranking and Jaccard similarity.
 **
 ** BSD 3-Clause License. See LICENSE for details.
 */
