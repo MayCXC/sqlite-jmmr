@@ -26,8 +26,8 @@ the list.
 computes pairwise Jaccard similarity between their token sets, and runs a greedy
 MMR selection loop to trade relevance off against diversity.
 
-The virtual table is FTS5-agnostic: it evaluates a **text expression** and a
-**rank expression** against the source table, then reranks on the text. The text
+`mmr` evaluates a **text expression** and a **rank expression** against the
+source table, then reranks on the text. The text
 expression is split on whitespace into a token set, so it should yield
 already-tokenized text. For an FTS5 source,
 [`sqlite-fts5x`](https://github.com/MayCXC/sqlite-fts5x)'s `match_tokens(fts)`
