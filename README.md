@@ -9,9 +9,9 @@ Jaccard similarity.
 - Written in pure C, no dependencies beyond SQLite
 - Single file (`mmr0.c`), compiles to a small shared library
 
-Token extraction for the FTS5 case (`match_tokens`, `tokenize`, `snippet_text`)
-lives in the companion [`sqlite-fts5x`](https://github.com/MayCXC/sqlite-fts5x)
-extension; `mmr` consumes its output as the text expression.
+For an FTS5 source, [`sqlite-fts5x`](https://github.com/MayCXC/sqlite-fts5x)'s `match_tokens`
+(and `tokenize`, `snippet_text`) give already-tokenized text that makes a clean text expression;
+any MATCH-capable table works too.
 
 ## The problem
 
